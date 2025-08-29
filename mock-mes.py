@@ -121,19 +121,37 @@ def rollback_operation(sfc_id):
 
 @app.route("/sfc/<sfc_id>/force_advance", methods=["POST"])
 def force_advance(sfc_id):
-    """Avanzamento forzato SFC a uno step specifico"""
+    """Avanzamento forzato SFC a uno step specifico.
+    Le operazioni precedenti allo step target diventano 'bypassed' 
+    solo se erano 'blank' o 'in work'. Le operazioni già 'done' rimangono in 'done'.
+    Lo step target diventa 'in work'. Le successive rimangono 'blank'.
+    Input JSON: {"step": n}
+    """
+    if sfc_id not in sfcs:
+        return jsonify({"error": "SFC not found"}), 404
+
     data = request.json
     target_step = data.get("step")
     operations = sfcs[sfc_id]["operations"]
+
+    if not isinstance(target_step, int) or target_step < 1 or target_step > len(operations):
+        return jsonify({"error": "Invalid step"}), 400
+
     for i, op in enumerate(operations):
-        if i < target_step-1:
-            if op["state"] != "done":
+        if i < target_step - 1:
+            if op["state"] in ["blank", "in work"]:
                 op["state"] = "bypassed"
-        elif i == target_step-1:
+            # se era done rimane done
+        elif i == target_step - 1:
             op["state"] = "in work"
         else:
             op["state"] = "blank"
-    return jsonify({"sfc_id": sfc_id, "operations": operations, "sfc_state": get_sfc_state(sfc_id)})
+
+    return jsonify({
+        "sfc_id": sfc_id,
+        "operations": operations,
+        "sfc_state": get_sfc_state(sfc_id)
+    })
 
 @app.route("/sfc/<sfc_id>/rollback_single", methods=["POST"])
 def rollback_single_operation(sfc_id):
