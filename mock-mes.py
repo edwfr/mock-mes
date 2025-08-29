@@ -137,25 +137,39 @@ def force_advance(sfc_id):
 
 @app.route("/sfc/<sfc_id>/rollback_single", methods=["POST"])
 def rollback_single_operation(sfc_id):
-    """Rollback di una singola operazione"""
-    data = request.json
-    step = data.get("step")
+    """Rollback della sola operazione corrente 'in work' dello SFC.
+    La corrente diventa 'blank', la precedente (che era 'done') diventa 'in work'.
+    Non è possibile fare rollback se la corrente è la prima operazione.
+    """
+    if sfc_id not in sfcs:
+        return jsonify({"error": "SFC not found"}), 404
+
     operations = sfcs[sfc_id]["operations"]
 
-    if step < 1 or step > len(operations):
-        return jsonify({"error": "Invalid step"}), 400
+    # Trova l'operazione corrente in work
+    current_idx = None
+    for i, op in enumerate(operations):
+        if op["state"] == "in work":
+            current_idx = i
+            break
 
-    idx = step - 1
-    # se l'operazione era in work, la resetto e rendo la precedente in work (se esiste)
-    if operations[idx]["state"] == "in work":
-        operations[idx]["state"] = "blank"
-        if idx > 0:
-            operations[idx-1]["state"] = "in work"
-    else:
-        # in tutti gli altri casi diventa blank
-        operations[idx]["state"] = "blank"
+    if current_idx is None:
+        return jsonify({"error": "No operation currently in work"}), 400
 
-    return jsonify({"sfc_id": sfc_id, "operations": operations, "sfc_state": get_sfc_state(sfc_id)})
+    if current_idx == 0:
+        return jsonify({"error": "Cannot rollback the first operation"}), 400
+
+    # Imposta corrente a blank
+    operations[current_idx]["state"] = "blank"
+    # Imposta la precedente (che era done) a in work
+    operations[current_idx - 1]["state"] = "in work"
+
+    return jsonify({
+        "sfc_id": sfc_id,
+        "operations": operations,
+        "sfc_state": get_sfc_state(sfc_id)
+    })
+
 
 @app.route("/sfc/<sfc_id>/complete", methods=["POST"])
 def complete_operation(sfc_id):
