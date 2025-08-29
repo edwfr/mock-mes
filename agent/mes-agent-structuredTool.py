@@ -1,11 +1,14 @@
 from __future__ import annotations
 import requests
 from langchain_openai import AzureChatOpenAI
-from langchain.agents import initialize_agent, Tool, AgentType
+from langchain.agents import initialize_agent, AgentType
+from langchain.tools import StructuredTool
 from langchain.memory import ConversationBufferMemory
+from pydantic import BaseModel
 from dotenv import load_dotenv
-import json
 import os
+import json
+from pydantic import TypeAdapter
 
 load_dotenv()
 
@@ -45,81 +48,92 @@ def safe_get(url):
         return f"Errore GET {url}: {str(e)}"
 
 # =======================
+# MODELLI INPUT STRUCTURED
+# =======================
+class SFCStepInput(BaseModel):
+    sfc_id: str
+    step: int
+
+class SFCAndRoutingInput(BaseModel):
+    sfc_id: str
+    routing_id: str
+
+# =======================
 # MES TOOLS
 # =======================
-
 def create_sfc_tool_func(input: str):
     """Crea un nuovo SFC con ID univoco. Stato iniziale: 'New'."""
     return safe_post(f"{BASE_URL}/sfc")
 
 def create_routing_tool_func(input: str):
     """Crea un routing con un numero specifico di operazioni (1-15). Input JSON: {'operations': n}"""
-    try:
-        payload = json.loads(input) if input else None
-    except Exception:
-        payload = None
-    return safe_post(f"{BASE_URL}/routing", payload)
+    data = input if input else "{}"
+    return safe_post(f"{BASE_URL}/routing", json.loads(data))
 
-def assign_routing_tool_func(input: str):
+def assign_routing_tool_func(input: SFCAndRoutingInput):
     """
     Assegna un routing a uno SFC.
     Input JSON: {"sfc_id":"SFCMOCK1","routing_id":"ROUTING2"}
     """
-    try:
-        payload = json.loads(input)
-        sfc_id = payload["sfc_id"]
-        routing_id = payload["routing_id"]
-        return safe_post(f"{BASE_URL}/sfc/{sfc_id}/assign_routing", {"routing_id": routing_id})
-    except Exception as e:
-        return f"Errore assign_routing_tool_func: {str(e)}"
+    return safe_post(f"{BASE_URL}/sfc/{input.sfc_id}/assign_routing", {"routing_id": input.routing_id})
 
 def advance_operation_tool_func(input: str):
-    """Completa l’operazione corrente in 'in work' e avanza alla successiva. Input: ID SFC"""
+    """Completa l'operazione corrente in 'in work' e avanza alla successiva. Input: ID SFC"""
     sfc_id = input.strip()
     return safe_post(f"{BASE_URL}/sfc/{sfc_id}/advance")
 
-def rollback_tool_func(input: str):
+def rollback_wrapper(input_data):
+    """
+    Wrapper che accetta:
+    - un dict
+    - un oggetto SFCStepInput
+    e chiama rollback_tool_func
+    """
+    if isinstance(input_data, dict):
+        input_obj = SFCStepInput(**input_data)
+    elif isinstance(input_data, SFCStepInput):
+        input_obj = input_data
+    else:
+        raise ValueError(f"Tipo input non supportato: {type(input_data)}")
+    
+    return rollback_tool_func(input_obj)
+
+def rollback_tool_func(input: SFCStepInput):
     """
     Riporta lo SFC a uno step specifico.
     Input JSON: {"sfc_id":"SFCMOCK1","step":3}
     """
-    try:
-        payload = json.loads(input)
-        sfc_id = payload["sfc_id"]
-        step = payload["step"]
-        return safe_post(f"{BASE_URL}/sfc/{sfc_id}/rollback", {"step": step})
-    except Exception as e:
-        return f"Errore rollback_tool_func: {str(e)}"
+    return safe_post(f"{BASE_URL}/sfc/{input.sfc_id}/rollback", {"step": input.step})
 
-def rollback_single_tool_func(input: str):
+
+def rollback_single_tool_func(input: SFCStepInput):
     """
     Riporta una singola operazione a 'blank'.
+    Si può usare questa funziona in maniera sequenziale per portare indietro l'sfc di più operazioni nel caso in cui la funzione di rollback massiva non funzioni.
     Input JSON: {"sfc_id":"SFCMOCK1","step":3}
     """
-    try:
-        payload = json.loads(input)
-        sfc_id = payload["sfc_id"]
-        step = payload["step"]
-        return safe_post(f"{BASE_URL}/sfc/{sfc_id}/rollback_single", {"step": step})
-    except Exception as e:
-        return f"Errore rollback_single_tool_func: {str(e)}"
+    return safe_post(f"{BASE_URL}/sfc/{input.sfc_id}/rollback_single", {"step": input.step})
 
-def force_advance_tool_func(input: str):
+def force_advance_tool_wrapper(input: dict | SFCStepInput):
+    """
+    Wrapper che accetta dict o SFCStepInput e chiama la funzione reale
+    """
+    if isinstance(input, dict):
+        input_obj = SFCStepInput(**input)
+    else:
+        input_obj = input
+    return force_advance_tool_func(input_obj)
+
+def force_advance_tool_func(input: SFCStepInput):
     """
     Avanza uno SFC a uno step specifico.
     Gli step intermedi non completati diventano 'bypassed'.
     Input JSON: {"sfc_id":"SFCMOCK1","step":5}
     """
-    try:
-        payload = json.loads(input)
-        sfc_id = payload["sfc_id"]
-        step = payload["step"]
-        return safe_post(f"{BASE_URL}/sfc/{sfc_id}/force_advance", {"step": step})
-    except Exception as e:
-        return f"Errore force_advance_tool_func: {str(e)}"
+    return safe_post(f"{BASE_URL}/sfc/{input.sfc_id}/force_advance", {"step": input.step})
 
 def complete_operation_tool_func(input: str):
-    """Completa l’operazione corrente dello SFC. Input: ID SFC"""
+    """Completa l'operazione corrente dello SFC. Input: ID SFC"""
     sfc_id = input.strip()
     return safe_post(f"{BASE_URL}/sfc/{sfc_id}/complete")
 
@@ -142,21 +156,21 @@ def get_all_routings_tool_func(input: str = ""):
     return safe_get(f"{BASE_URL}/routings")
 
 # =======================
-# LISTA TOOLS
+# CREAZIONE TOOLS STRUCTURED
 # =======================
 efTools = [
-    Tool(name="create_sfc", func=create_sfc_tool_func, description=create_sfc_tool_func.__doc__),
-    Tool(name="create_routing", func=create_routing_tool_func, description=create_routing_tool_func.__doc__),
-    Tool(name="assign_routing", func=assign_routing_tool_func, description=assign_routing_tool_func.__doc__),
-    Tool(name="advance_operation", func=advance_operation_tool_func, description=advance_operation_tool_func.__doc__),
-    Tool(name="rollback", func=rollback_tool_func, description=rollback_tool_func.__doc__),
-    Tool(name="rollback_single", func=rollback_single_tool_func, description=rollback_single_tool_func.__doc__),
-    Tool(name="force_advance", func=force_advance_tool_func, description=force_advance_tool_func.__doc__),
-    Tool(name="complete_operation", func=complete_operation_tool_func, description=complete_operation_tool_func.__doc__),
-    Tool(name="get_sfc", func=get_sfc_tool_func, description=get_sfc_tool_func.__doc__),
-    Tool(name="get_routing_state", func=get_routing_state_tool_func, description=get_routing_state_tool_func.__doc__),
-    Tool(name="get_all_sfcs", func=get_all_sfcs_tool_func, description=get_all_sfcs_tool_func.__doc__),
-    Tool(name="get_all_routings", func=get_all_routings_tool_func, description=get_all_routings_tool_func.__doc__),
+    StructuredTool.from_function(create_sfc_tool_func, name="create_sfc", description=create_sfc_tool_func.__doc__),
+    StructuredTool.from_function(create_routing_tool_func, name="create_routing", description=create_routing_tool_func.__doc__),
+    StructuredTool.from_function(assign_routing_tool_func, name="assign_routing", description=assign_routing_tool_func.__doc__),
+    StructuredTool.from_function(advance_operation_tool_func, name="advance_operation", description=advance_operation_tool_func.__doc__),
+    StructuredTool.from_function(rollback_wrapper, name="rollback", description=rollback_tool_func.__doc__),
+    StructuredTool.from_function(rollback_single_tool_func, name="rollback_single", description=rollback_single_tool_func.__doc__),
+    StructuredTool.from_function(force_advance_tool_wrapper, name="force_advance", description=force_advance_tool_func.__doc__),
+    StructuredTool.from_function(complete_operation_tool_func, name="complete_operation", description=complete_operation_tool_func.__doc__),
+    StructuredTool.from_function(get_sfc_tool_func, name="get_sfc", description=get_sfc_tool_func.__doc__),
+    StructuredTool.from_function(get_routing_state_tool_func, name="get_routing_state", description=get_routing_state_tool_func.__doc__),
+    StructuredTool.from_function(get_all_sfcs_tool_func, name="get_all_sfcs", description=get_all_sfcs_tool_func.__doc__),
+    StructuredTool.from_function(get_all_routings_tool_func, name="get_all_routings", description=get_all_routings_tool_func.__doc__),
 ]
 
 # =======================
